@@ -67,19 +67,19 @@ curl -X POST http://localhost:8000/local/api/index.php \
 This triggers the backend to bundle your database schema, seeded classes, and the Majestic Obsidian quiz questions into a new snapshot folder.
 
 ```bash
-curl -X POST http://localhost:8000/local/api/index.php \
+curl -X POST hhttps://api-rendersample-php.onrender.com/local/api/index.php \
   -H "Content-Type: application/x-www-form-urlencoded" \
   -d "action=admin_db_export" \
   -d "key=lumina_secret_restore_2026"
  ```
-  
+
 (When completed, it will return the path where the freshly generated .sql and .zip files reside).
 
 2. API Curl: Override & Restore Database Tables
 This triggers the backend to locate the latest export payload in your project root, completely drop the existing tables, and rebuild the database from scratch holding the exported curriculum.
 
 ```bash
-curl -X POST http://localhost:8000/local/api/index.php \
+curl -X POST https://api-rendersample-php.onrender.com/local/api/index.php \
   -H "Content-Type: application/x-www-form-urlencoded" \
   -d "action=admin_db_restore" \
   -d "key=lumina_secret_restore_2026"

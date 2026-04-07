@@ -216,7 +216,11 @@ $CFG->wwwroot   = getenv('RENDER_EXTERNAL_URL') ?: 'http://localhost:8000';
 //
 // - On Windows systems you might specify something like 'c:\moodledata'
 
-$CFG->dataroot  = getenv('MOODLE_DATA_DIR') ?: '/Users/test1/Downloads/moodle_data';
+$CFG->dataroot  = getenv('MOODLE_DATA_DIR') ?: __DIR__ . '/moodledata';
+
+if (!is_dir($CFG->dataroot)) {
+    mkdir($CFG->dataroot, 02777, true);
+}
 
 // Whether the Moodle router is fully configured.
 //
