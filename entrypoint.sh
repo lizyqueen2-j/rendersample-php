@@ -136,10 +136,11 @@ ALREADY_INSTALLED=$(php -r "
   if (!\$conn) {
       \$conn = @pg_connect(\"host=\$host port=\$port dbname=\$db user=\$user password=\$pass connect_timeout=3\");
   }
-  if (!\$conn) exit(0); // If can't connect yet, assume not installed
+  if (!\$conn) { echo '0'; exit(0); } // If can't connect, safely assume not installed
   \$res = @pg_query(\$conn, \"SELECT 1 FROM information_schema.tables WHERE table_name = 'mdl_config' LIMIT 1\");
-  \$row = pg_fetch_row(\$res);
-  exit(\$row ? 1 : 0);
+  \$row = @pg_fetch_row(\$res);
+  echo (\$row ? '1' : '0');
+  exit(0);
 ")
 
 if [ "$ALREADY_INSTALLED" -eq 1 ]; then
