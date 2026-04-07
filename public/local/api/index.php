@@ -278,32 +278,86 @@ try {
 
         case 'auth_signup_user':
             $params = [
-                'username'  => required_param('username', PARAM_RAW),
+                'username'  => required_param('username', PARAM_USERNAME),
                 'password'  => required_param('password', PARAM_RAW),
                 'email'     => required_param('email', PARAM_EMAIL),
                 'firstname' => required_param('firstname', PARAM_TEXT),
                 'lastname'  => required_param('lastname', PARAM_TEXT),
                 'city'      => optional_param('city', '', PARAM_TEXT),
-                'country'   => optional_param('country', '', PARAM_ALPHA)
+                'country'   => strtoupper(substr(trim(optional_param('country', '', PARAM_TEXT)), 0, 2))
             ];
 
-            // Check for duplicate username/email
+            // 1. Check for duplicates
             if ($DB->record_exists('user', ['username' => $params['username']])) {
                 http_response_code(409);
                 $_api_response['status']  = 'error';
                 $_api_response['code']    = 'username_taken';
-                $_api_response['message'] = "The username '{$params['username']}' is already taken. Please choose another.";
+                $_api_response['message'] = "The username '{$params['username']}' is already taken.";
                 break;
             }
             if ($DB->record_exists('user', ['email' => $params['email']])) {
                 http_response_code(409);
                 $_api_response['status']  = 'error';
                 $_api_response['code']    = 'email_taken';
-                $_api_response['message'] = 'That email address is already registered. Try logging in instead.';
+                $_api_response['message'] = 'That email address is already registered.';
                 break;
             }
 
-            $_api_response['data'] = ['status' => true, 'message' => "Account for '{$params['username']}' created successfully. Please check your email to verify your account."];
+            // 2. Create validated user (Auto-Verify)
+            require_once($CFG->dirroot . '/user/lib.php');
+            $user = new stdClass();
+            $user->username          = $params['username'];
+            $user->password          = hash_internal_user_password($params['password']);
+            $user->email             = $params['email'];
+            $user->firstname         = $params['firstname'];
+            $user->lastname          = $params['lastname'];
+            $user->city              = $params['city'];
+            $user->country           = $params['country'];
+            $user->confirmed         = 1; // 🟢 AUTO-VERIFY!
+            $user->mnethostid        = $CFG->mnet_localhost_id;
+            $user->lang              = 'en';
+            $user->auth              = 'manual';
+            $user->timemodified      = time();
+            $user->timecreated       = time();
+            // Mandatory 5.x fields
+            $user->description       = '';
+            $user->descriptionformat = FORMAT_HTML;
+            $user->idnumber          = '';
+            $user->institution       = '';
+            $user->department        = '';
+            $user->phone1            = '';
+            $user->phone2            = '';
+            $user->address           = '';
+            $user->firstnamephonetic = '';
+            $user->lastnamephonetic  = '';
+            $user->middlename        = '';
+            $user->alternatename     = '';
+
+            $user_id = user_create_user($user, false, false);
+            
+            // 3. Generate Persisted Token for immediate login
+            $new_token = bin2hex(random_bytes(20));
+            $insert = new stdClass();
+            $insert->token             = $new_token;
+            $insert->userid            = $user_id;
+            $insert->tokentype         = EXTERNAL_TOKEN_PERMANENT;
+            $insert->externalserviceid = 0; // headless fallback
+            $insert->contextid         = context_system::instance()->id;
+            $insert->creatorid         = $user_id;
+            $insert->timecreated       = time();
+            $insert->validuntil        = 0;
+            $insert->lastaccess        = time();
+            $DB->insert_record('external_tokens', $insert);
+
+            // 4. Return Session
+            $_api_response['data'] = [
+                'user_id'  => $user_id,
+                'username' => $params['username'],
+                'token'    => $new_token,
+                'fullname' => "{$params['firstname']} {$params['lastname']}",
+                'is_admin' => false,
+                'role'     => 'student'
+            ];
             break;
 
         case 'auth_request_password_reset':
