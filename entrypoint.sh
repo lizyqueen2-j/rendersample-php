@@ -75,11 +75,12 @@ echo "[Entrypoint] Waiting for database to be ready..."
 MAX_RETRIES=60
 RETRY=0
 
+set +e
 echo "[Entrypoint] Probing network path to $DB_P_HOST:$DB_P_PORT..."
 until pg_isready -h "$DB_P_HOST" -p "$DB_P_PORT" -t 5; do
   RETRY=$((RETRY + 1))
   if [ "$RETRY" -ge "$MAX_RETRIES" ]; then
-    echo "[Entrypoint] ERROR: Network path unreachable after $MAX_RETRIES attempts."
+    echo "[Entrypoint] ERROR: Network path unreachable after $MAX_RETRIES attempts. Exiting."
     exit 1
   fi
   echo "[Entrypoint] Network path not open yet (attempt $RETRY/$MAX_RETRIES)..."
@@ -97,7 +98,6 @@ until php -r "
   
   \$con_string = \"host='\$host' port='\$port' dbname='\$db' user='\$user' password='\$pass' connect_timeout=3 sslmode=require\";
   \$conn = @pg_connect(\$con_string);
-  // Fallback to strict DB check if first one fails
   if (!\$conn) {
      \$con_string = \"host='\$host' port='\$port' dbname='\$db' user='\$user' password='\$pass' connect_timeout=3\";
      \$conn = @pg_connect(\$con_string);
@@ -110,12 +110,13 @@ until php -r "
 "; do
   RETRY=$((RETRY + 1))
   if [ "$RETRY" -ge "$MAX_RETRIES" ]; then
-    echo "[Entrypoint] ERROR: Credential handshake failed after $MAX_RETRIES attempts."
+    echo "[Entrypoint] ERROR: Credential handshake failed after $MAX_RETRIES attempts. Exiting."
     exit 1
   fi
   echo "[Entrypoint] DB handshake failed (attempt $RETRY/$MAX_RETRIES)..."
   sleep 3
 done
+set -e
 
 echo "[Entrypoint] Database is fully ready!"
 
@@ -125,6 +126,7 @@ echo "[Entrypoint] Database is fully ready!"
 # -------------------------------------------------------------------------
 # Check if Moodle tables already exist specifically in mdl_config
 echo "[Entrypoint] Checking if Moodle is already installed..."
+set +e
 ALREADY_INSTALLED=$(php -r "
   \$host = getenv('DB_P_HOST');
   \$port = getenv('DB_P_PORT');
@@ -138,51 +140,53 @@ ALREADY_INSTALLED=$(php -r "
   }
   if (!\$conn) { echo '0'; exit(0); } // If can't connect, safely assume not installed
   \$res = @pg_query(\$conn, \"SELECT 1 FROM information_schema.tables WHERE table_name = 'mdl_config' LIMIT 1\");
-  \$row = @pg_fetch_row(\$res);
-  echo (\$row ? '1' : '0');
+  if (\$res !== false) {
+      \$row = @pg_fetch_row(\$res);
+      echo (\$row ? '1' : '0');
+  } else {
+      echo '0';
+  }
   exit(0);
-")
+" 2>/dev/null)
+set -e
 
-if [ "$ALREADY_INSTALLED" -eq 1 ]; then
-  echo "[Entrypoint] SKIPPING INSTALLER: Moodle database schema detected."
-else
-  echo "[Entrypoint] Running Moodle database installer (this may take up to 15 minutes)..."
-  ADMIN_PASS="${MOODLE_ADMIN_PASS:-Admin1234!}"
-  
-  set +e  # allow installer to return non-zero without aborting script
-  php /var/www/html/admin/cli/install_database.php \
-      --agree-license \
-      --fullname="Lumina LMS" \
-      --shortname="lumina" \
-      --adminuser="admin" \
-      --adminpass="$ADMIN_PASS" \
-      --adminemail="admin@lumina.com"
-  INSTALL_EXIT=$?
-  set -e
-  
-  if [ "$INSTALL_EXIT" -eq 0 ]; then
-    echo "[Entrypoint] Moodle installed successfully."
-  else
-    echo "[Entrypoint] Installer exited with code $INSTALL_EXIT (likely already installed — continuing)."
-  fi
+# Defensive fallback in case php crashed anyway
+if [ -z "$ALREADY_INSTALLED" ] || [ "$ALREADY_INSTALLED" != "1" ]; then
+  ALREADY_INSTALLED="0"
 fi
 
 # -------------------------------------------------------------------------
-# STEP 2b: Clear any stale Moodle upgrade lock
+# STEP 2 & 3: Run Heavy DB operations and Seeders in the BACKGROUND
+# This prevents Render's strict 60s port timeout from killing the container
+# while Moodle slowly executes its 10-minute database hydration.
 # -------------------------------------------------------------------------
-echo "[Entrypoint] Clearing any stale Moodle upgrade lock..."
-PGPASSWORD="$DB_P_PASS" psql \
-  "host=$DB_P_HOST port=$DB_P_PORT dbname=$DB_P_NAME user=$DB_P_USER sslmode=require" \
-  -c "DELETE FROM mdl_config WHERE name = 'upgraderunning';" \
-  && echo "[Entrypoint] Upgrade lock cleared." \
-  || echo "[Entrypoint] Warn: Could not clear upgrade lock (table may not exist yet — safe to ignore on first install)."
-
-# -------------------------------------------------------------------------
-# STEP 3: Seed data in the BACKGROUND so Apache starts immediately.
-# -------------------------------------------------------------------------
-echo "[Entrypoint] Launching seeders in background. Starting Apache immediately..."
+echo "[Entrypoint] Launching Background Worker for heavy provisioning..."
 
 (
+  echo "[Seeder] Background worker booted at $(date)."
+
+  if [ "$ALREADY_INSTALLED" -eq 1 ]; then
+    echo "[Entrypoint] SKIPPING INSTALLER: Moodle database schema detected."
+  else
+    echo "[Entrypoint] Running Moodle database installer in background (eta: 10 mins)..."
+    ADMIN_PASS="${MOODLE_ADMIN_PASS:-Admin1234!}"
+    
+    php /var/www/html/admin/cli/install_database.php \
+        --agree-license \
+        --fullname="Lumina LMS" \
+        --shortname="lumina" \
+        --adminuser="admin" \
+        --adminpass="$ADMIN_PASS" \
+        --adminemail="admin@lumina.com" || echo "[Entrypoint] Installer yielded non-zero exit code (likely safe)"
+        
+    echo "[Entrypoint] Clearing any stale Moodle upgrade lock..."
+    PGPASSWORD="$DB_P_PASS" psql \
+      "host=$DB_P_HOST port=$DB_P_PORT dbname=$DB_P_NAME user=$DB_P_USER sslmode=require" \
+      -c "DELETE FROM mdl_config WHERE name = 'upgraderunning';" \
+      && echo "[Entrypoint] Upgrade lock cleared." \
+      || echo "[Entrypoint] Warn: Could not clear upgrade lock."
+  fi
+
   echo "[Seeder] Background seeding started at $(date)."
 
   if [ -f "/var/www/html/seed_categories.php" ]; then
@@ -201,7 +205,7 @@ echo "[Entrypoint] Launching seeders in background. Starting Apache immediately.
       php /var/www/html/seed_grades_messages.php || echo "Warn: seed_grades_messages failed."
   fi
 
-  echo "[Seeder] Background seeding complete at $(date)."
+  echo "[Seeder] Background worker complete at $(date)."
 ) &
 
 echo "[Entrypoint] Seeders running in background (PID $!). Starting Apache on port $APACHE_PORT..."
